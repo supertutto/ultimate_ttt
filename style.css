@@ -1,0 +1,78 @@
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+:root {
+  --bg:       #16150f;
+  --panel-bg: #1e1d19;
+  --border:   #3a3835;
+  --txt-a:    #d7d4cd;
+  --txt-b:    #7a7872;
+  --x-col:    #eb5f5c;
+  --o-col:    #52b0e4;
+  --eval-l:   #e2e0da;
+  --eval-d:   #1e1c1a;
+}
+
+html, body {
+  height: 100%; width: 100%;
+  background: var(--bg);
+  color: var(--txt-a);
+  font-family: 'Segoe UI', Arial, sans-serif;
+  overflow: hidden;
+  touch-action: none;
+  user-select: none;
+}
+
+#app {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  height: 100%;
+  width: 100%;
+}
+
+canvas {
+  display: block;
+  /* lasciamo che JS imposti width/height */
+}
+
+#status {
+  position: fixed;
+  top: 6px; left: 0; right: 0;
+  text-align: center;
+  font-size: 15px;
+  font-weight: bold;
+  pointer-events: none;
+  letter-spacing: .03em;
+}
+
+#install-banner {
+  position: fixed;
+  bottom: 0; left: 0; right: 0;
+  background: #2a2926;
+  border-top: 1px solid var(--border);
+  padding: 10px 16px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  font-size: 13px;
+  gap: 10px;
+  z-index: 999;
+}
+
+#install-banner button {
+  background: #3a6a3a;
+  color: #fff;
+  border: none;
+  border-radius: 5px;
+  padding: 7px 16px;
+  font-size: 13px;
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+#install-banner .dismiss {
+  background: transparent;
+  color: var(--txt-b);
+  border: 1px solid var(--border);
+}

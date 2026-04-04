@@ -1,0 +1,60 @@
+<!DOCTYPE html>
+<html lang="it">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0,
+        viewport-fit=cover, user-scalable=no">
+  <meta name="theme-color" content="#16150f">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+  <meta name="apple-mobile-web-app-title" content="UltimateTTT">
+  <link rel="manifest" href="./manifest.json">
+  <link rel="stylesheet" href="./style.css">
+  <title>Ultimate Tic-Tac-Toe</title>
+</head>
+<body>
+<div id="app">
+  <canvas id="gameCanvas"></canvas>
+</div>
+
+<!-- Banner installazione PWA -->
+<div id="install-banner" style="display:none">
+  <span>Installa l'app sulla schermata home!</span>
+  <div style="display:flex;gap:8px">
+    <button id="install-btn">Installa</button>
+    <button class="dismiss" id="dismiss-btn">Non ora</button>
+  </div>
+</div>
+
+<!-- Carica costanti, logica, AI e UI nell'ordine corretto -->
+<script src="./js/constants.js"></script>
+<script src="./js/game.js"></script>
+<script src="./js/ui.js"></script>
+<script src="./js/main.js"></script>
+
+<script>
+  // Service Worker
+  if ('serviceWorker' in navigator) {
+    navigator.serviceWorker.register('./sw.js').catch(console.error);
+  }
+
+  // PWA install prompt (Android Chrome)
+  let deferredPrompt;
+  window.addEventListener('beforeinstallprompt', (e) => {
+    e.preventDefault();
+    deferredPrompt = e;
+    document.getElementById('install-banner').style.display = 'flex';
+  });
+  document.getElementById('install-btn').addEventListener('click', async () => {
+    if (!deferredPrompt) return;
+    deferredPrompt.prompt();
+    const { outcome } = await deferredPrompt.userChoice;
+    deferredPrompt = null;
+    document.getElementById('install-banner').style.display = 'none';
+  });
+  document.getElementById('dismiss-btn').addEventListener('click', () => {
+    document.getElementById('install-banner').style.display = 'none';
+  });
+</script>
+</body>
+</html>
