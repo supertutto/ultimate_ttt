@@ -1,4 +1,4 @@
-// main.js — Game loop con touch mobile corretto
+// main.js — Game loop con touch mobile e AI continua
 
 const canvas = document.getElementById('gameCanvas');
 const ui     = new UI(canvas);
@@ -12,25 +12,29 @@ let score     = 0;
 let menuRects = [];
 let mouse     = { x: -1, y: -1 };
 let thinking  = false;
+let aiMovePending = false;
 
 // ── Web Worker ────────────────────────────────────────────────────────────────
 const worker = new Worker('./js/ai.js');
 
-let aiMovePending = false;  // blocca doppie esecuzioni
+// Ogni volta che vogliamo riavviare l'AI usiamo un session ID:
+// il worker manda il sessionId con ogni risultato, e noi ignoriamo
+// i risultati di sessioni vecchie (arrivati dopo uno stop).
+let aiSession = 0;
 
 worker.onmessage = (e) => {
   const msg = e.data;
   if (msg.type !== 'result') return;
 
+  // Ignora risultati di sessioni precedenti
+  if (msg.session !== aiSession) return;
+
   // Aggiorna sempre score e hint (barra eval in tempo reale)
   score    = msg.score;
   hintMove = msg.move;
 
-  // Esegui mossa AI solo se:
-  // - non stiamo già applicando una mossa
-  // - la partita non è finita
-  // - è effettivamente il turno dell'AI
-  // - abbiamo analizzato abbastanza
+  // Esegui mossa AI solo se è davvero il suo turno e non stiamo
+  // già processando una mossa
   if (aiMovePending) return;
   if (game.over) return;
   if (aiPlayer === null) return;
@@ -42,16 +46,27 @@ worker.onmessage = (e) => {
   if (!legal) return;
 
   aiMovePending = true;
-  stopAI();
+
+  // Manda stop al worker (non aspettiamo — il session check farà il resto)
+  worker.postMessage({ type: 'stop', session: aiSession });
+
+  // Applica la mossa: questo chiama startAI() che incrementa aiSession,
+  // quindi eventuali messaggi rimasti in coda dal vecchio session vengono scartati
   applyMove(msg.move.b, msg.move.c);
+
   aiMovePending = false;
 };
 
 function startAI() {
-  if (game.over) return;
+  if (game.over) { thinking = false; return; }
+
+  // Incrementa session: i messaggi con session vecchio verranno ignorati
+  aiSession++;
   thinking = true;
+
   worker.postMessage({
     type: 'start',
+    session: aiSession,
     state: {
       board:  game.board,
       big:    game.big,
@@ -64,21 +79,21 @@ function startAI() {
   });
 }
 
-function stopAI() {
-  worker.postMessage({type:'stop'});
-  thinking = false;
-}
-
 function applyMove(b, c) {
   game.push(b, c);
   showHint = false;
   hintMove = null;
   score    = 0;
-  startAI();
+  startAI();   // riavvia sempre — l'AI calcola sia per sé che per suggerimenti
 }
 
 function newGame() {
-  stopAI();
+  // Invalida sessione corrente
+  aiSession++;
+  worker.postMessage({ type: 'stop', session: aiSession });
+  thinking      = false;
+  aiMovePending = false;
+
   game     = new Game();
   aiPlayer = null;
   showMenu = true;
@@ -106,10 +121,9 @@ function render() {
   requestAnimationFrame(render);
 }
 
-// ── Input unificato mouse + touch ─────────────────────────────────────────────
+// ── Input ─────────────────────────────────────────────────────────────────────
 function getPos(e) {
   const rect = canvas.getBoundingClientRect();
-  // scaleX/scaleY gestiscono il caso canvas CSS != canvas pixels
   const scaleX = canvas.width  / rect.width;
   const scaleY = canvas.height / rect.height;
   let cx, cy;
@@ -123,28 +137,18 @@ function getPos(e) {
     cx = e.clientX;
     cy = e.clientY;
   }
-  return {
-    x: (cx - rect.left) * scaleX,
-    y: (cy - rect.top)  * scaleY,
-  };
+  return { x: (cx - rect.left) * scaleX, y: (cy - rect.top) * scaleY };
 }
 
 function inRect(pos, r) {
-  return pos.x >= r.x && pos.x < r.x + r.w &&
-         pos.y >= r.y && pos.y < r.y + r.h;
+  return r && pos.x >= r.x && pos.x < r.x + r.w &&
+              pos.y >= r.y && pos.y < r.y + r.h;
 }
 
-function handlePointerMove(e) {
-  mouse = getPos(e);
-}
-
-function handlePointerDown(e) {
-  // Aggiorna mouse subito anche al touch, così i bottoni mostrano hover
-  mouse = getPos(e);
-}
+function handlePointerMove(e) { mouse = getPos(e); }
+function handlePointerDown(e) { mouse = getPos(e); }
 
 function handlePointerUp(e) {
-  // Usa changedTouches per touchend (touches è vuoto al momento del rilascio)
   const pos = getPos(e);
   const L   = ui.L;
 
@@ -162,16 +166,14 @@ function handlePointerUp(e) {
 
   if (game.over) { newGame(); return; }
 
-  // Nuova partita
-  if (L.newR && inRect(pos, L.newR)) { newGame(); return; }
+  if (inRect(pos, L.newR)) { newGame(); return; }
 
-  // Toggle hint (solo turno umano)
   if (L.hintR && aiPlayer !== game.player && inRect(pos, L.hintR)) {
     showHint = !showHint;
     return;
   }
 
-  // Click/tap sulla board — solo se turno umano
+  // Mossa umana
   if (game.player !== aiPlayer &&
       pos.x >= L.bx && pos.x < L.bx + L.bp &&
       pos.y >= L.by && pos.y < L.by + L.bp) {
@@ -189,30 +191,18 @@ function handlePointerUp(e) {
 }
 
 // Mouse
-canvas.addEventListener('mousemove',  handlePointerMove);
-canvas.addEventListener('mousedown',  handlePointerDown);
-canvas.addEventListener('mouseup',    handlePointerUp);
+canvas.addEventListener('mousemove', handlePointerMove);
+canvas.addEventListener('mousedown', handlePointerDown);
+canvas.addEventListener('mouseup',   handlePointerUp);
 
-// Touch — touchstart registra posizione, touchend esegue azione
-// NON usiamo { passive: false } su touchstart per non bloccare lo scroll
-canvas.addEventListener('touchstart', (e) => {
-  handlePointerDown(e);
-}, { passive: true });
-
-canvas.addEventListener('touchmove', (e) => {
-  handlePointerMove(e);
-}, { passive: true });
-
+// Touch
+canvas.addEventListener('touchstart', handlePointerDown, { passive: true });
+canvas.addEventListener('touchmove',  handlePointerMove, { passive: true });
 canvas.addEventListener('touchend', (e) => {
-  // preventDefault qui blocca il click fantasma che arriva 300ms dopo
   e.preventDefault();
   handlePointerUp(e);
 }, { passive: false });
 
-// NON aggiungere listener su 'click' — touchend + preventDefault lo sopprime già
-
-// Resize
 window.addEventListener('resize', () => { ui.update(); });
 
-// ── Avvio ─────────────────────────────────────────────────────────────────────
 render();

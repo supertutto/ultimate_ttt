@@ -1,6 +1,6 @@
 // sw.js — Service Worker
 // INCREMENTA CACHE_VERSION ad ogni aggiornamento per forzare il refresh
-const CACHE_VERSION = 'v1.0.3';
+const CACHE_VERSION = 'v1.0.4';
 const CACHE_NAME    = 'uttt-' + CACHE_VERSION;
 const ASSETS = [
   './', './index.html', './style.css',

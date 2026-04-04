@@ -248,31 +248,44 @@ function minimax(g, depth, alpha, beta, isMax, stopped) {
 }
 
 // ── Message handler ───────────────────────────────────────────────────────────
-let stopped = {v: false};
+let stopped   = { v: false };
+let curSession = -1;
 
 self.onmessage = function(e) {
   const msg = e.data;
-  if (msg.type === 'stop') { stopped.v = true; return; }
+
+  if (msg.type === 'stop') {
+    stopped.v = true;
+    return;
+  }
+
   if (msg.type !== 'start') return;
 
-  stopped = {v: false};
+  // Ferma eventuale calcolo precedente
+  stopped.v  = true;
+  stopped    = { v: false };   // nuovo oggetto per il nuovo giro
+  curSession = msg.session;
   tt.clear();
 
   const g = new Game();
-  g.board  = msg.state.board.map(r=>[...r]);
+  g.board  = msg.state.board.map(r => [...r]);
   g.big    = [...msg.state.big];
   g.player = msg.state.player;
   g.active = msg.state.active;
   g.over   = msg.state.over;
   g.winner = msg.state.winner;
-  g.hist   = msg.state.hist.map(m=>({...m}));
+  g.hist   = msg.state.hist.map(m => ({...m}));
 
   const isMax = g.player === 'X';
-  for (let depth=1; depth<=AI_MAX_DEPTH; depth++) {
-    if (stopped.v) break;
-    const {v, m} = minimax(g, depth, -Infinity, Infinity, isMax, stopped);
-    if (!stopped.v && m !== null) {
-      self.postMessage({type:'result', score:v, move:m, depth});
+  const sess  = curSession;   // cattura locale per questo loop
+
+  for (let depth = 1; depth <= AI_MAX_DEPTH; depth++) {
+    if (stopped.v || curSession !== sess) break;
+    const { v, m } = minimax(g, depth, -Infinity, Infinity, isMax, stopped);
+    if (!stopped.v && curSession === sess && m !== null) {
+      // Manda il session ID con il risultato così main.js può scartare
+      // risultati di sessioni vecchie
+      self.postMessage({ type: 'result', score: v, move: m, depth, session: sess });
       if (Math.abs(v) >= W.WIN - 200) break;
     }
   }
