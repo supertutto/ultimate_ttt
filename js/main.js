@@ -16,17 +16,35 @@ let thinking  = false;
 // ── Web Worker ────────────────────────────────────────────────────────────────
 const worker = new Worker('./js/ai.js');
 
+let aiMovePending = false;  // blocca doppie esecuzioni
+
 worker.onmessage = (e) => {
   const msg = e.data;
   if (msg.type !== 'result') return;
+
+  // Aggiorna sempre score e hint (barra eval in tempo reale)
   score    = msg.score;
   hintMove = msg.move;
 
-  if (!game.over && aiPlayer !== null && game.player === aiPlayer
-      && msg.move !== null && msg.depth >= 4) {
-    const legal = game.moves().some(m => m.b===msg.move.b && m.c===msg.move.c);
-    if (legal) { stopAI(); applyMove(msg.move.b, msg.move.c); }
-  }
+  // Esegui mossa AI solo se:
+  // - non stiamo già applicando una mossa
+  // - la partita non è finita
+  // - è effettivamente il turno dell'AI
+  // - abbiamo analizzato abbastanza
+  if (aiMovePending) return;
+  if (game.over) return;
+  if (aiPlayer === null) return;
+  if (game.player !== aiPlayer) return;
+  if (msg.depth < 4) return;
+  if (msg.move === null) return;
+
+  const legal = game.moves().some(m => m.b === msg.move.b && m.c === msg.move.c);
+  if (!legal) return;
+
+  aiMovePending = true;
+  stopAI();
+  applyMove(msg.move.b, msg.move.c);
+  aiMovePending = false;
 };
 
 function startAI() {
