@@ -126,7 +126,7 @@ function handlePointerDown(e) {
 }
 
 function handlePointerUp(e) {
-  e.preventDefault();
+  // Usa changedTouches per touchend (touches è vuoto al momento del rilascio)
   const pos = getPos(e);
   const L   = ui.L;
 
@@ -175,14 +175,23 @@ canvas.addEventListener('mousemove',  handlePointerMove);
 canvas.addEventListener('mousedown',  handlePointerDown);
 canvas.addEventListener('mouseup',    handlePointerUp);
 
-// Touch — usiamo touchstart per aggiornare il mouse (hover),
-// touchend per eseguire l'azione (evita doppio-fire con click)
-canvas.addEventListener('touchstart', handlePointerDown, { passive: true });
-canvas.addEventListener('touchmove',  handlePointerMove, { passive: true });
-canvas.addEventListener('touchend',   handlePointerUp,   { passive: false });
+// Touch — touchstart registra posizione, touchend esegue azione
+// NON usiamo { passive: false } su touchstart per non bloccare lo scroll
+canvas.addEventListener('touchstart', (e) => {
+  handlePointerDown(e);
+}, { passive: true });
 
-// Evita che il doppio-tap zoom di iOS interferisca
-canvas.addEventListener('click', e => e.preventDefault());
+canvas.addEventListener('touchmove', (e) => {
+  handlePointerMove(e);
+}, { passive: true });
+
+canvas.addEventListener('touchend', (e) => {
+  // preventDefault qui blocca il click fantasma che arriva 300ms dopo
+  e.preventDefault();
+  handlePointerUp(e);
+}, { passive: false });
+
+// NON aggiungere listener su 'click' — touchend + preventDefault lo sopprime già
 
 // Resize
 window.addEventListener('resize', () => { ui.update(); });
