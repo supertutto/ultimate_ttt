@@ -1,7 +1,7 @@
-// main.js — Game loop PWA
+// main.js — Game loop con touch mobile corretto
 
-const canvas  = document.getElementById('gameCanvas');
-const ui      = new UI(canvas);
+const canvas = document.getElementById('gameCanvas');
+const ui     = new UI(canvas);
 
 let game      = new Game();
 let aiPlayer  = null;
@@ -10,27 +10,22 @@ let hintMove  = null;
 let showHint  = false;
 let score     = 0;
 let menuRects = [];
-let mouse     = { x: 0, y: 0 };
+let mouse     = { x: -1, y: -1 };
 let thinking  = false;
 
-// ── Web Worker AI ──────────────────────────────────────────────────────────
+// ── Web Worker ────────────────────────────────────────────────────────────────
 const worker = new Worker('./js/ai.js');
 
 worker.onmessage = (e) => {
   const msg = e.data;
   if (msg.type !== 'result') return;
-
   score    = msg.score;
   hintMove = msg.move;
 
   if (!game.over && aiPlayer !== null && game.player === aiPlayer
       && msg.move !== null && msg.depth >= 4) {
-    const mvs = game.moves();
-    const legal = mvs.some(m => m.b === msg.move.b && m.c === msg.move.c);
-    if (legal) {
-      stopAI();
-      applyMove(msg.move.b, msg.move.c);
-    }
+    const legal = game.moves().some(m => m.b===msg.move.b && m.c===msg.move.c);
+    if (legal) { stopAI(); applyMove(msg.move.b, msg.move.c); }
   }
 };
 
@@ -52,31 +47,31 @@ function startAI() {
 }
 
 function stopAI() {
-  worker.postMessage({ type: 'stop' });
+  worker.postMessage({type:'stop'});
   thinking = false;
 }
 
 function applyMove(b, c) {
   game.push(b, c);
-  showHint  = false;
-  hintMove  = null;
-  score     = 0;   // verrà aggiornato dall'AI
+  showHint = false;
+  hintMove = null;
+  score    = 0;
   startAI();
 }
 
 function newGame() {
   stopAI();
-  game      = new Game();
-  aiPlayer  = null;
-  showMenu  = true;
-  hintMove  = null;
-  showHint  = false;
-  score     = 0;
+  game     = new Game();
+  aiPlayer = null;
+  showMenu = true;
+  hintMove = null;
+  showHint = false;
+  score    = 0;
 }
 
-// ── Render loop ────────────────────────────────────────────────────────────
+// ── Render loop ───────────────────────────────────────────────────────────────
 function render() {
-  const ctx = ui.ctx, L = ui.L;
+  const L = ui.L, ctx = ui.ctx;
   ctx.fillStyle = C.BG;
   ctx.fillRect(0, 0, L.W, L.H);
 
@@ -93,25 +88,51 @@ function render() {
   requestAnimationFrame(render);
 }
 
-// ── Input (mouse + touch) ─────────────────────────────────────────────────
+// ── Input unificato mouse + touch ─────────────────────────────────────────────
 function getPos(e) {
   const rect = canvas.getBoundingClientRect();
-  const src  = e.touches ? e.touches[0] : e;
-  return { x: src.clientX - rect.left, y: src.clientY - rect.top };
+  // scaleX/scaleY gestiscono il caso canvas CSS != canvas pixels
+  const scaleX = canvas.width  / rect.width;
+  const scaleY = canvas.height / rect.height;
+  let cx, cy;
+  if (e.changedTouches && e.changedTouches.length > 0) {
+    cx = e.changedTouches[0].clientX;
+    cy = e.changedTouches[0].clientY;
+  } else if (e.touches && e.touches.length > 0) {
+    cx = e.touches[0].clientX;
+    cy = e.touches[0].clientY;
+  } else {
+    cx = e.clientX;
+    cy = e.clientY;
+  }
+  return {
+    x: (cx - rect.left) * scaleX,
+    y: (cy - rect.top)  * scaleY,
+  };
 }
 
-function handleMove(e) {
+function inRect(pos, r) {
+  return pos.x >= r.x && pos.x < r.x + r.w &&
+         pos.y >= r.y && pos.y < r.y + r.h;
+}
+
+function handlePointerMove(e) {
   mouse = getPos(e);
 }
 
-function handleClick(e) {
+function handlePointerDown(e) {
+  // Aggiorna mouse subito anche al touch, così i bottoni mostrano hover
+  mouse = getPos(e);
+}
+
+function handlePointerUp(e) {
   e.preventDefault();
   const pos = getPos(e);
   const L   = ui.L;
 
   if (showMenu) {
-    for (const { r, role } of menuRects) {
-      if (pos.x>=r.x && pos.x<r.x+r.w && pos.y>=r.y && pos.y<r.y+r.h) {
+    for (const {r, role} of menuRects) {
+      if (inRect(pos, r)) {
         aiPlayer = role;
         showMenu = false;
         startAI();
@@ -124,38 +145,47 @@ function handleClick(e) {
   if (game.over) { newGame(); return; }
 
   // Nuova partita
-  const nr = L.newR;
-  if (pos.x>=nr.x && pos.x<nr.x+nr.w && pos.y>=nr.y && pos.y<nr.y+nr.h) {
-    newGame(); return;
+  if (L.newR && inRect(pos, L.newR)) { newGame(); return; }
+
+  // Toggle hint (solo turno umano)
+  if (L.hintR && aiPlayer !== game.player && inRect(pos, L.hintR)) {
+    showHint = !showHint;
+    return;
   }
 
-  // Toggle hint
-  const hr = L.hintR;
-  if (aiPlayer !== game.player &&
-      pos.x>=hr.x && pos.x<hr.x+hr.w && pos.y>=hr.y && pos.y<hr.y+hr.h) {
-    showHint = !showHint; return;
-  }
-
-  // Click board (solo turno umano)
+  // Click/tap sulla board — solo se turno umano
   if (game.player !== aiPlayer &&
-      pos.x >= L.bx && pos.x < L.bx+L.bp &&
-      pos.y >= L.by && pos.y < L.by+L.bp) {
-    const rx  = pos.x - L.bx, ry = pos.y - L.by;
-    const bc2 = Math.floor(rx / L.gp), br2 = Math.floor(ry / L.gp);
+      pos.x >= L.bx && pos.x < L.bx + L.bp &&
+      pos.y >= L.by && pos.y < L.by + L.bp) {
+    const rx  = pos.x - L.bx;
+    const ry  = pos.y - L.by;
+    const bc2 = Math.floor(rx / L.gp);
+    const br2 = Math.floor(ry / L.gp);
     const c2  = Math.floor((rx % L.gp) / L.cp);
     const r2  = Math.floor((ry % L.gp) / L.cp);
-    const b   = br2*3 + bc2, c = r2*3 + c2;
-    const legal = game.moves().some(m => m.b===b && m.c===c);
+    const b   = br2 * 3 + bc2;
+    const c   = r2  * 3 + c2;
+    const legal = game.moves().some(m => m.b === b && m.c === c);
     if (legal) applyMove(b, c);
   }
 }
 
-canvas.addEventListener('mousemove',  handleMove);
-canvas.addEventListener('touchmove',  handleMove, { passive: true });
-canvas.addEventListener('click',      handleClick);
-canvas.addEventListener('touchend',   handleClick);
+// Mouse
+canvas.addEventListener('mousemove',  handlePointerMove);
+canvas.addEventListener('mousedown',  handlePointerDown);
+canvas.addEventListener('mouseup',    handlePointerUp);
 
+// Touch — usiamo touchstart per aggiornare il mouse (hover),
+// touchend per eseguire l'azione (evita doppio-fire con click)
+canvas.addEventListener('touchstart', handlePointerDown, { passive: true });
+canvas.addEventListener('touchmove',  handlePointerMove, { passive: true });
+canvas.addEventListener('touchend',   handlePointerUp,   { passive: false });
+
+// Evita che il doppio-tap zoom di iOS interferisca
+canvas.addEventListener('click', e => e.preventDefault());
+
+// Resize
 window.addEventListener('resize', () => { ui.update(); });
 
-// ── Avvio ──────────────────────────────────────────────────────────────────
+// ── Avvio ─────────────────────────────────────────────────────────────────────
 render();
