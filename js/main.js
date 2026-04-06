@@ -1,10 +1,10 @@
-// main.js — Game loop con touch mobile e AI continua
+// main.js — Game loop principale
 
 const canvas = document.getElementById('gameCanvas');
 const ui     = new UI(canvas);
 
 let game      = new Game();
-let aiPlayer  = null;
+let aiPlayer  = null;   // 'X' | 'O' | null (due giocatori)
 let showMenu  = true;
 let hintMove  = null;
 let showHint  = false;
@@ -12,61 +12,50 @@ let score     = 0;
 let menuRects = [];
 let mouse     = { x: -1, y: -1 };
 let thinking  = false;
-let aiMovePending = false;
+
+const AI_TIME_MS = 1500;   // ms di ragionamento per mossa AI
 
 // ── Web Worker ────────────────────────────────────────────────────────────────
 const worker = new Worker('./js/ai.js');
 
-// Ogni volta che vogliamo riavviare l'AI usiamo un session ID:
-// il worker manda il sessionId con ogni risultato, e noi ignoriamo
-// i risultati di sessioni vecchie (arrivati dopo uno stop).
-let aiSession = 0;
-
 worker.onmessage = (e) => {
   const msg = e.data;
-  if (msg.type !== 'result') return;
 
-  // Ignora risultati di sessioni precedenti
-  if (msg.session !== aiSession) return;
+  if (msg.type === 'result') {
+    // Aggiornamento in tempo reale: barra eval e hint
+    score    = msg.score;
+    hintMove = msg.move;
+    return;
+  }
 
-  // Aggiorna sempre score e hint (barra eval in tempo reale)
-  score    = msg.score;
-  hintMove = msg.move;
+  if (msg.type === 'done') {
+    // Calcolo terminato
+    thinking = false;
+    score    = msg.score;
 
-  // Esegui mossa AI solo se è davvero il suo turno e non stiamo
-  // già processando una mossa
-  if (aiMovePending) return;
-  if (game.over) return;
-  if (aiPlayer === null) return;
-  if (game.player !== aiPlayer) return;
-  if (msg.depth < 4) return;
-  if (msg.move === null) return;
+    if (game.over) return;
 
-  const legal = game.moves().some(m => m.b === msg.move.b && m.c === msg.move.c);
-  if (!legal) return;
+    // Se era il turno dell'AI → esegui la mossa
+    if (aiPlayer !== null && game.player === aiPlayer && msg.move !== null) {
+      const legal = game.moves().some(m => m.b===msg.move.b && m.c===msg.move.c);
+      if (legal) {
+        _applyMove(msg.move.b, msg.move.c);
+        return;
+      }
+    }
 
-  aiMovePending = true;
-
-  // Manda stop al worker (non aspettiamo — il session check farà il resto)
-  worker.postMessage({ type: 'stop', session: aiSession });
-
-  // Applica la mossa: questo chiama startAI() che incrementa aiSession,
-  // quindi eventuali messaggi rimasti in coda dal vecchio session vengono scartati
-  applyMove(msg.move.b, msg.move.c);
-
-  aiMovePending = false;
+    // Altrimenti (turno umano o due giocatori): aggiorna solo hint
+    hintMove = msg.move;
+  }
 };
 
-function startAI() {
+function _startAI(forMove) {
   if (game.over) { thinking = false; return; }
-
-  // Incrementa session: i messaggi con session vecchio verranno ignorati
-  aiSession++;
   thinking = true;
-
+  hintMove = null;
   worker.postMessage({
-    type: 'start',
-    session: aiSession,
+    type:   'start',
+    timeMs: forMove ? AI_TIME_MS : AI_TIME_MS * 2,  // hint ha più tempo
     state: {
       board:  game.board,
       big:    game.big,
@@ -79,27 +68,24 @@ function startAI() {
   });
 }
 
-function applyMove(b, c) {
+function _applyMove(b, c) {
   game.push(b, c);
-  showHint = false;
-  hintMove = null;
-  score    = 0;
-  startAI();   // riavvia sempre — l'AI calcola sia per sé che per suggerimenti
+  showHint  = false;
+  hintMove  = null;
+  score     = 0;
+  // Riavvia AI per la nuova posizione
+  // (sia per muovere se tocca all'AI, sia per aggiornare hint/eval)
+  _startAI(aiPlayer !== null && game.player === aiPlayer);
 }
 
-function newGame() {
-  // Invalida sessione corrente
-  aiSession++;
-  worker.postMessage({ type: 'stop', session: aiSession });
-  thinking      = false;
-  aiMovePending = false;
-
-  game     = new Game();
-  aiPlayer = null;
-  showMenu = true;
-  hintMove = null;
-  showHint = false;
-  score    = 0;
+function _newGame() {
+  thinking  = false;
+  game      = new Game();
+  aiPlayer  = null;
+  showMenu  = true;
+  hintMove  = null;
+  showHint  = false;
+  score     = 0;
 }
 
 // ── Render loop ───────────────────────────────────────────────────────────────
@@ -123,7 +109,7 @@ function render() {
 
 // ── Input ─────────────────────────────────────────────────────────────────────
 function getPos(e) {
-  const rect = canvas.getBoundingClientRect();
+  const rect   = canvas.getBoundingClientRect();
   const scaleX = canvas.width  / rect.width;
   const scaleY = canvas.height / rect.height;
   let cx, cy;
@@ -134,15 +120,14 @@ function getPos(e) {
     cx = e.touches[0].clientX;
     cy = e.touches[0].clientY;
   } else {
-    cx = e.clientX;
-    cy = e.clientY;
+    cx = e.clientX; cy = e.clientY;
   }
   return { x: (cx - rect.left) * scaleX, y: (cy - rect.top) * scaleY };
 }
 
 function inRect(pos, r) {
-  return r && pos.x >= r.x && pos.x < r.x + r.w &&
-              pos.y >= r.y && pos.y < r.y + r.h;
+  return r && pos.x >= r.x && pos.x < r.x+r.w &&
+              pos.y >= r.y && pos.y < r.y+r.h;
 }
 
 function handlePointerMove(e) { mouse = getPos(e); }
@@ -152,41 +137,54 @@ function handlePointerUp(e) {
   const pos = getPos(e);
   const L   = ui.L;
 
+  // ── Menu ────────────────────────────────────────────────────────────
   if (showMenu) {
     for (const {r, role} of menuRects) {
       if (inRect(pos, r)) {
         aiPlayer = role;
         showMenu = false;
-        startAI();
+        // Avvia AI subito per calcolare la prima mossa o hint
+        _startAI(aiPlayer !== null && game.player === aiPlayer);
         return;
       }
     }
     return;
   }
 
-  if (game.over) { newGame(); return; }
+  // ── Game over ────────────────────────────────────────────────────────
+  if (game.over) { _newGame(); return; }
 
-  if (inRect(pos, L.newR)) { newGame(); return; }
+  // ── Nuova partita ────────────────────────────────────────────────────
+  if (inRect(pos, L.newR)) { _newGame(); return; }
 
-  if (L.hintR && aiPlayer !== game.player && inRect(pos, L.hintR)) {
-    showHint = !showHint;
+  // ── Suggerimento ─────────────────────────────────────────────────────
+  // Disponibile sempre tranne durante il turno AI (quando l'AI sta muovendo)
+  if (inRect(pos, L.hintR)) {
+    const isAiTurn = aiPlayer !== null && game.player === aiPlayer;
+    if (!isAiTurn) {
+      showHint = !showHint;
+      // Se richiesto e non c'è già un hint, avvia calcolo
+      if (showHint && hintMove === null && !thinking) {
+        _startAI(false);
+      }
+    }
     return;
   }
 
-  // Mossa umana
-  if (game.player !== aiPlayer &&
-      pos.x >= L.bx && pos.x < L.bx + L.bp &&
-      pos.y >= L.by && pos.y < L.by + L.bp) {
-    const rx  = pos.x - L.bx;
-    const ry  = pos.y - L.by;
-    const bc2 = Math.floor(rx / L.gp);
-    const br2 = Math.floor(ry / L.gp);
+  // ── Mossa sulla board ─────────────────────────────────────────────────
+  // Bloccata se è il turno dell'AI o se l'AI sta ancora pensando
+  const isAiTurn = aiPlayer !== null && game.player === aiPlayer;
+  if (isAiTurn || thinking) return;
+
+  if (pos.x >= L.bx && pos.x < L.bx+L.bp &&
+      pos.y >= L.by && pos.y < L.by+L.bp) {
+    const rx  = pos.x - L.bx, ry = pos.y - L.by;
+    const bc2 = Math.floor(rx / L.gp), br2 = Math.floor(ry / L.gp);
     const c2  = Math.floor((rx % L.gp) / L.cp);
     const r2  = Math.floor((ry % L.gp) / L.cp);
-    const b   = br2 * 3 + bc2;
-    const c   = r2  * 3 + c2;
-    const legal = game.moves().some(m => m.b === b && m.c === c);
-    if (legal) applyMove(b, c);
+    const b   = br2*3 + bc2, c = r2*3 + c2;
+    const legal = game.moves().some(m => m.b===b && m.c===c);
+    if (legal) _applyMove(b, c);
   }
 }
 
@@ -205,4 +203,5 @@ canvas.addEventListener('touchend', (e) => {
 
 window.addEventListener('resize', () => { ui.update(); });
 
+// ── Start ─────────────────────────────────────────────────────────────────────
 render();

@@ -1,8 +1,6 @@
-// ai.js — Web Worker autocontenuto
-// Tutte le costanti e la logica di gioco sono replicate qui dentro
-// perché il Worker non ha accesso ai file caricati nell'HTML.
+// ai.js — Web Worker autocontenuto, con tempo limite per la mossa AI
 
-// ── Costanti (replica di constants.js) ───────────────────────────────────────
+// ── Costanti ──────────────────────────────────────────────────────────────────
 const WIN_LINES = [
   [0,1,2],[3,4,5],[6,7,8],
   [0,3,6],[1,4,7],[2,5,8],
@@ -20,8 +18,9 @@ const W = {
   OL:            4,
 };
 const AI_MAX_DEPTH = 30;
+const AI_TIME_MS   = 1500;   // tempo massimo per mossa AI (ms)
 
-// ── Logica di gioco (replica di game.js) ─────────────────────────────────────
+// ── Logica di gioco ───────────────────────────────────────────────────────────
 function opp(p){ return p === 'X' ? 'O' : 'X'; }
 
 function checkGrid(grid) {
@@ -161,7 +160,6 @@ function evaluate(g) {
   return s;
 }
 
-// ── Ordinamento mosse ─────────────────────────────────────────────────────────
 function orderMoves(g, mvs) {
   const p = g.player, e = opp(p);
   return [...mvs].sort((ma, mb) => {
@@ -189,16 +187,17 @@ function ttKey(g) {
          g.big.join('')+'|'+g.active+'|'+g.player;
 }
 
-function minimax(g, depth, alpha, beta, isMax, stopped) {
-  if (stopped.v) return { v: evaluate(g), m: null };
+// deadline: timestamp oltre il quale fermarsi
+function minimax(g, depth, alpha, beta, isMax, deadline) {
+  if (Date.now() >= deadline) return { v: evaluate(g), m: null, timeout: true };
 
   const key = ttKey(g);
   if (tt.has(key)) {
     const e = tt.get(key);
     if (e.d >= depth) {
-      if (e.f==='exact')               return {v:e.v, m:e.m};
-      if (e.f==='lower'&&e.v>=beta)    return {v:e.v, m:e.m};
-      if (e.f==='upper'&&e.v<=alpha)   return {v:e.v, m:e.m};
+      if (e.f==='exact')             return {v:e.v, m:e.m};
+      if (e.f==='lower'&&e.v>=beta)  return {v:e.v, m:e.m};
+      if (e.f==='upper'&&e.v<=alpha) return {v:e.v, m:e.m};
     }
   }
 
@@ -212,81 +211,79 @@ function minimax(g, depth, alpha, beta, isMax, stopped) {
   }
 
   mvs = orderMoves(g, mvs);
-  let bm = mvs[0], oa = alpha;
+  let bm = mvs[0], oa = alpha, timedOut = false;
 
   if (isMax) {
     let bv = -Infinity;
     for (const m of mvs) {
-      if (stopped.v) break;
       const ns = g.copy(); ns.push(m.b, m.c);
-      const {v} = minimax(ns, depth-1, alpha, beta, false, stopped);
-      if (v > bv) { bv=v; bm=m; }
+      const res = minimax(ns, depth-1, alpha, beta, false, deadline);
+      if (res.timeout) { timedOut = true; break; }
+      if (res.v > bv) { bv=res.v; bm=m; }
       alpha = Math.max(alpha, bv);
       if (alpha >= beta) break;
     }
-    if (!stopped.v) {
+    if (!timedOut) {
       const f = bv<=oa?'upper': bv>=beta?'lower':'exact';
       tt.set(key, {d:depth, f, v:bv, m:bm});
     }
-    return {v:bv, m:bm};
+    return {v:bv, m:bm, timeout:timedOut};
   } else {
     let bv = Infinity;
     for (const m of mvs) {
-      if (stopped.v) break;
       const ns = g.copy(); ns.push(m.b, m.c);
-      const {v} = minimax(ns, depth-1, alpha, beta, true, stopped);
-      if (v < bv) { bv=v; bm=m; }
+      const res = minimax(ns, depth-1, alpha, beta, true, deadline);
+      if (res.timeout) { timedOut = true; break; }
+      if (res.v < bv) { bv=res.v; bm=m; }
       beta = Math.min(beta, bv);
       if (alpha >= beta) break;
     }
-    if (!stopped.v) {
+    if (!timedOut) {
       const f = bv<=oa?'upper': bv>=beta?'lower':'exact';
       tt.set(key, {d:depth, f, v:bv, m:bm});
     }
-    return {v:bv, m:bm};
+    return {v:bv, m:bm, timeout:timedOut};
   }
 }
 
 // ── Message handler ───────────────────────────────────────────────────────────
-let stopped   = { v: false };
-let curSession = -1;
-
 self.onmessage = function(e) {
   const msg = e.data;
-
-  if (msg.type === 'stop') {
-    stopped.v = true;
-    return;
-  }
-
   if (msg.type !== 'start') return;
 
-  // Ferma eventuale calcolo precedente
-  stopped.v  = true;
-  stopped    = { v: false };   // nuovo oggetto per il nuovo giro
-  curSession = msg.session;
   tt.clear();
 
   const g = new Game();
-  g.board  = msg.state.board.map(r => [...r]);
+  g.board  = msg.state.board.map(r=>[...r]);
   g.big    = [...msg.state.big];
   g.player = msg.state.player;
   g.active = msg.state.active;
   g.over   = msg.state.over;
   g.winner = msg.state.winner;
-  g.hist   = msg.state.hist.map(m => ({...m}));
+  g.hist   = msg.state.hist.map(m=>({...m}));
 
-  const isMax = g.player === 'X';
-  const sess  = curSession;   // cattura locale per questo loop
+  const isMax    = g.player === 'X';
+  const deadline = Date.now() + msg.timeMs;
+
+  let bestV = evaluate(g), bestM = null;
+
+  // Mossa di fallback immediata (depth 1) nel caso il tempo sia esaurito
+  const fallbackMvs = orderMoves(g, g.moves());
+  if (fallbackMvs.length > 0) bestM = fallbackMvs[0];
 
   for (let depth = 1; depth <= AI_MAX_DEPTH; depth++) {
-    if (stopped.v || curSession !== sess) break;
-    const { v, m } = minimax(g, depth, -Infinity, Infinity, isMax, stopped);
-    if (!stopped.v && curSession === sess && m !== null) {
-      // Manda il session ID con il risultato così main.js può scartare
-      // risultati di sessioni vecchie
-      self.postMessage({ type: 'result', score: v, move: m, depth, session: sess });
-      if (Math.abs(v) >= W.WIN - 200) break;
+    if (Date.now() >= deadline) break;
+    const res = minimax(g, depth, -Infinity, Infinity, isMax, deadline);
+    if (res.m !== null) {
+      bestV = res.v;
+      bestM = res.m;
+      // Manda aggiornamento in tempo reale
+      self.postMessage({ type: 'result', score: bestV, move: bestM, depth });
     }
+    if (res.timeout) break;
+    if (Math.abs(bestV) >= W.WIN - 200) break;  // vittoria certa trovata
   }
+
+  // Risultato finale — segnala che il calcolo è terminato
+  self.postMessage({ type: 'done', score: bestV, move: bestM });
 };
