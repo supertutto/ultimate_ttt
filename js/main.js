@@ -39,14 +39,20 @@ let reviewScore  = 0;
 let reviewThink  = false;
 
 // ── Server ────────────────────────────────────────────────────────────────────
-let srvOk  = false;
-let srvMsg = 'Server offline';
-let srvPat = '';
+let srvOk     = false;
+let srvMsg    = 'Server offline';
+let srvPat    = '';
+let srvDBHits = 0;   // quante volte l'AI ha usato il DB in questa sessione
 
 async function pingSrv(){
   try {
     const r=await fetch(SERVER+'/ping',{signal:AbortSignal.timeout(2000)});
-    if(r.ok){ const d=await r.json(); srvOk=true; srvMsg=`DB: ${d.db} pos`; return; }
+    if(r.ok){
+      const d=await r.json();
+      srvOk=true;
+      srvMsg=`DB: ${d.total_in_db||d.db||0} | Hit: ${srvDBHits}`;
+      return;
+    }
   } catch(e){}
   srvOk=false; srvMsg='Server offline';
 }
@@ -103,6 +109,10 @@ worker.onmessage=({data:msg})=>{
     score    = msg.score;
     hintMove = msg.move;
     if(msg.pv) pv = msg.pv;
+    if(msg.fromDB){
+      srvDBHits++;
+      srvPat = `DB hit #${srvDBHits} (depth ${msg.depth})`;
+    }
     return;
   }
   if(msg.type==='done'){
@@ -171,6 +181,27 @@ function _gameOver(){
   showPostGame=true;
 }
 
+// ── Review lines dal server ───────────────────────────────────────────────────
+let reviewLines = [];   // linee alternative calcolate dal server
+
+async function fetchReviewLines(g){
+  reviewLines = [];
+  if(!srvOk || g.over) return;
+  try {
+    const r=await fetch(SERVER+'/lines',{
+      method:'POST',
+      headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({
+        board:g.board, big:g.big, player:g.player,
+        active:g.active, over:g.over, winner:g.winner,
+        hist:g.hist.map(({b,c})=>[b,c]),
+        n:5, depth:6
+      }),
+      signal:AbortSignal.timeout(15000)
+    });
+    if(r.ok){ const d=await r.json(); reviewLines=d.lines||[]; }
+  } catch(e){}
+}
 // ── Review ────────────────────────────────────────────────────────────────────
 function enterReview(){
   const g=new Game();
@@ -211,7 +242,7 @@ function render(){
     const lastMv=reviewStep>0?reviewStates[reviewStep].hist[reviewStep-1]:null;
     ui.drawBoard(g,null,false,reviewPV,lastMv);
     ui.drawReview(reviewStates,doneEvals,reviewStep,
-                  doneGame.winner,aiPlayer,mouse,reviewScore,reviewThink,reviewPV);
+                  doneGame.winner,aiPlayer,mouse,reviewScore,reviewThink,reviewPV,reviewLines);
   } else {
     ui.drawEvalBar(score);
     const showPV = showHint || (aiPlayer!==null && game.player===aiPlayer);

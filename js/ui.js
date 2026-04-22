@@ -544,12 +544,14 @@ class UI {
   }
 
   // ── Server badge ──────────────────────────────────────────────────────────
-  drawServerBadge(connected, msg, pattern) {
+  drawServerBadge(connected, msg, pattern, dbHits) {
     const ctx = this.ctx, L = this.L;
-    const bw = Math.min(170, Math.floor(L.W / 4));
+    const bw = Math.min(190, Math.floor(L.W / 4));
     const bh = L.fsz + 8;
     const bx = L.W - bw - 6, by = 4;
-    ctx.fillStyle = connected ? 'rgba(30,60,30,0.88)' : 'rgba(50,20,20,0.88)';
+
+    // Riga 1: stato connessione + DB size
+    ctx.fillStyle = connected ? 'rgba(30,60,30,0.92)' : 'rgba(50,20,20,0.92)';
     this._rr(bx, by, bw, bh, 4, true, false);
     ctx.strokeStyle = connected ? '#3a8a3a' : '#8a3a3a'; ctx.lineWidth = 1;
     this._rr(bx, by, bw, bh, 4, false, true);
@@ -557,12 +559,27 @@ class UI {
     ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
     ctx.fillText(this._clip(msg, bw - 8, L.fTiny), bx + bw / 2, by + bh / 2);
 
-    if (connected && pattern) {
-      const ay = by + bh + 2;
-      ctx.fillStyle = 'rgba(18,18,16,0.88)'; this._rr(bx, ay, bw, bh, 4, true, false);
-      ctx.strokeStyle = '#3a3835'; this._rr(bx, ay, bw, bh, 4, false, true);
+    if (!connected) return;
+
+    // Riga 2: hit del DB usati dall'AI
+    const ay = by + bh + 2;
+    const hitTxt = dbHits > 0 ? `AI DB hits: ${dbHits}` : 'AI DB: in attesa...';
+    ctx.fillStyle = dbHits > 0 ? 'rgba(20,50,40,0.92)' : 'rgba(18,18,16,0.88)';
+    this._rr(bx, ay, bw, bh, 4, true, false);
+    ctx.strokeStyle = dbHits > 0 ? '#2a6a4a' : '#3a3835';
+    this._rr(bx, ay, bw, bh, 4, false, true);
+    ctx.fillStyle = dbHits > 0 ? '#60d0a0' : C.TXT_B;
+    ctx.fillText(this._clip(hitTxt, bw - 8, L.fTiny), bx + bw / 2, ay + bh / 2);
+
+    // Riga 3: pattern corrente (se disponibile)
+    if (pattern) {
+      const py2 = ay + bh + 2;
+      ctx.fillStyle = 'rgba(18,18,16,0.88)';
+      this._rr(bx, py2, bw, bh, 4, true, false);
+      ctx.strokeStyle = '#3a3835';
+      this._rr(bx, py2, bw, bh, 4, false, true);
       ctx.fillStyle = '#90b890';
-      ctx.fillText(this._clip(pattern, bw - 8, L.fTiny), bx + bw / 2, ay + bh / 2);
+      ctx.fillText(this._clip(pattern, bw - 8, L.fTiny), bx + bw / 2, py2 + bh / 2);
     }
   }
 
@@ -636,7 +653,7 @@ class UI {
 
   // ── Review ────────────────────────────────────────────────────────────────
   drawReview(states, evals, step, winner, aiPlayer, mouse,
-             reviewScore, reviewThink, reviewPV) {
+             reviewScore, reviewThink, reviewPV, reviewLines) {
     const ctx   = this.ctx, L = this.L;
     const total = states.length - 1;
 
@@ -653,8 +670,48 @@ class UI {
     const iw = pw - 16;
     let fy = py + 8;
 
-    // Header
-    ctx.font = L.fM; ctx.fillStyle = C.TXT_A;
+    // ── Linee alternative (sinistra della board) ──────────────────────────
+    if (!L.portrait && reviewLines && reviewLines.length) {
+      const lx = 6, ly = L.by, lw = Math.max(120, L.bx - 12), lh = L.bp;
+      ctx.fillStyle = C.PANEL_BG; this._rr(lx, ly, lw, lh, 6, true, false);
+      ctx.strokeStyle = C.BORDER; ctx.lineWidth = 1; this._rr(lx, ly, lw, lh, 6, false, true);
+
+      ctx.font = L.fTiny; ctx.fillStyle = C.TXT_B;
+      ctx.textAlign = 'left'; ctx.textBaseline = 'top';
+      ctx.fillText('Linee possibili:', lx + 6, ly + 6);
+
+      const liw = lw - 12;
+      let lfy = ly + L.fsz + 10;
+      const llineH = L.fsz + 3;
+
+      reviewLines.forEach((line, li) => {
+        if (lfy + llineH * 3 > ly + lh - 8) return;
+        const isX   = states[step] && states[step].player === 'X';
+        const good  = isX ? line.score > 0 : line.score < 0;
+        const mc    = Array.isArray(line.move) ? line.move : [line.move.b, line.move.c];
+        const mr    = Math.floor(mc[1] / 3), mcc = mc[1] % 3;
+        const lbl   = `${li+1}. g${mc[0]+1}(${mr+1},${mcc+1})`;
+        const sv    = Math.abs(line.score) >= 90000 ? (line.score>0?'+M':'-M')
+                    : (line.score>=0?'+':'')+((line.score/100).toFixed(1));
+
+        ctx.fillStyle = good ? C.X_COL : (line.score===0 ? C.TXT_B : C.O_COL);
+        ctx.fillText(this._clip(`${lbl} (${sv})`, liw, L.fTiny), lx + 6, lfy);
+        lfy += llineH;
+
+        // Mosse della PV di questa linea
+        if (line.pv && line.pv.length) {
+          const pvTxt = line.pv.slice(0, 4).map((m,i) => {
+            const p  = m.player||'?';
+            const r2 = Math.floor((m.c||m[1])/3), c2=(m.c||m[1])%3;
+            return `${p}:g${(m.b||m[0])+1}(${r2+1},${c2+1})`;
+          }).join(' ');
+          ctx.fillStyle = C.TXT_B;
+          ctx.fillText(this._clip(pvTxt, liw, L.fTiny), lx + 6, lfy);
+          lfy += llineH;
+        }
+        lfy += 3; // separatore tra linee
+      });
+    }
     ctx.textAlign = 'center'; ctx.textBaseline = 'top';
     ctx.fillText('REVISIONE PARTITA', px + pw / 2, fy);
     fy += L.fszm + 4;

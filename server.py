@@ -56,7 +56,10 @@ analysis_db   = {}   # key -> {score, depth, move, count, phase, pattern, pv}
 db_lock       = threading.Lock()
 worker_thread = None
 worker_stop   = threading.Event()
-status        = {"running": False, "analyzed": 0, "db_size": 0, "last_error": ""}
+status        = {"running": False,
+                 "session_analyzed": 0,   # contatore sessione corrente
+                 "total_in_db": 0,        # posizioni nel DB (persiste)
+                 "last_error": ""}
 
 # ─────────────────────────────────────────────────────────────────────────────
 # LOGICA DI GIOCO
@@ -428,8 +431,8 @@ def analysis_worker():
 
             with db_lock:
                 analysis_db[key] = entry
-                status['analyzed'] += 1
-                status['db_size']   = len(analysis_db)
+                status['session_analyzed'] += 1
+                status['total_in_db']       = len(analysis_db)
 
             errors = 0   # reset error counter on success
 
@@ -437,8 +440,8 @@ def analysis_worker():
             now = time.time()
             if now - last_print >= 10:
                 print(f"[Worker] loop={loop_count} | "
-                      f"analyzed={status['analyzed']} | "
-                      f"db={status['db_size']} | "
+                      f"this_session={status['session_analyzed']} | "
+                      f"total_in_db={status['total_in_db']} | "
                       f"last_depth={reached}")
                 last_print = now
 
@@ -461,7 +464,7 @@ def analysis_worker():
 
     _save_db()
     status['running'] = False
-    print(f"[Worker] Fermato. Totale analizzate: {status['analyzed']}, DB: {status['db_size']}")
+    print(f"[Worker] Fermato. Sessione: {status['session_analyzed']}, DB totale: {status['total_in_db']}")
 
 # ─────────────────────────────────────────────────────────────────────────────
 # DATABASE
@@ -486,7 +489,7 @@ def _load_db():
             data = json.load(f)
         with db_lock:
             analysis_db = data
-            status['db_size'] = len(data)
+            status['total_in_db'] = len(data)
         print(f"[DB] Caricato: {len(data)} posizioni")
     except Exception as e:
         print(f"[DB] Errore caricamento: {e}")
@@ -508,9 +511,11 @@ def static_files(path):
 # ─────────────────────────────────────────────────────────────────────────────
 @app.route('/ping')
 def ping():
-    return jsonify({'ok': True, 'db': len(analysis_db),
-                    'analyzed': status['analyzed'],
-                    'running': status['running']})
+    return jsonify({'ok': True,
+                    'db': len(analysis_db),
+                    'session_analyzed': status['session_analyzed'],
+                    'total_in_db':      status['total_in_db'],
+                    'running':          status['running']})
 
 @app.route('/status')
 def get_status():
@@ -598,7 +603,83 @@ def analyze():
         traceback.print_exc()
         return jsonify({'error': str(e)}), 500
 
-@app.route('/db_stats')
+@app.route('/lines', methods=['POST'])
+def get_lines():
+    """
+    Per una posizione data, restituisce le N mosse candidate
+    con la loro valutazione e la linea principale (PV) per ciascuna.
+    Usato dalla revisione per mostrare le linee alternative.
+    """
+    try:
+        data = request.json
+        g = Game()
+        g.board  = [list(r) for r in data['board']]
+        g.big    = list(data['big'])
+        g.player = data['player']
+        g.active = data.get('active')
+        g.over   = bool(data.get('over', False))
+        g.winner = data.get('winner')
+        g.hist   = parse_hist(data.get('hist', []))
+
+        if g.over:
+            return jsonify({'lines': [], 'score': evaluate(g)})
+
+        n_lines = min(int(data.get('n', 5)), 10)
+        max_depth = min(int(data.get('depth', 6)), 8)
+
+        stop_ev = threading.Event()
+        tt_local = {}
+        is_max   = g.player == 'X'
+        mvs      = g.moves()
+        if not mvs:
+            return jsonify({'lines': [], 'score': evaluate(g)})
+
+        # Valuta ogni mossa candidata
+        ordered = order_moves(g, mvs)[:n_lines]
+        lines   = []
+
+        for m in ordered:
+            ns = g.copy(); ns.push(*m)
+            best_v = evaluate(ns)
+            best_m2 = None
+            tt_m = {}
+            for depth in range(1, max_depth + 1):
+                if stop_ev.is_set(): break
+                v, m2 = minimax(ns, depth, float('-inf'), float('inf'),
+                                not is_max, stop_ev, tt_m)
+                if m2 is not None:
+                    best_v, best_m2 = v, m2
+                if abs(best_v) >= W_WIN - 200: break
+
+            # Estrai PV per questa linea
+            pv = []
+            cur = ns.copy()
+            seen = set()
+            for _ in range(6):
+                k = cur.key()
+                if k in seen or k not in tt_m: break
+                seen.add(k)
+                _,_,_,bm = tt_m[k]
+                if bm is None: break
+                if not any(mv==bm for mv in cur.moves()): break
+                pv.append({'b': bm[0], 'c': bm[1], 'player': cur.player})
+                cur.push(*bm)
+                if cur.over: break
+
+            lines.append({
+                'move':  list(m),
+                'score': int(best_v),
+                'depth': depth,
+                'pv':    pv,
+            })
+
+        # Ordina per vantaggio del giocatore corrente
+        lines.sort(key=lambda x: x['score'] * (1 if is_max else -1), reverse=True)
+        return jsonify({'lines': lines, 'player': g.player})
+
+    except Exception as e:
+        traceback.print_exc()
+        return jsonify({'error': str(e), 'lines': []}), 500
 def db_stats():
     with db_lock:
         phases = defaultdict(int); patterns = defaultdict(int)
@@ -635,13 +716,13 @@ if __name__ == '__main__':
 
     print(f"""
   ╔══════════════════════════════════════════════╗
-  ║  Ultimate TTT — Analysis Server              ║
+  ║  Ultimate TTT — Analysis Server             ║
   ╠══════════════════════════════════════════════╣
-  ║  PC:      http://localhost:5000              ║
-  ║  Telefono: http://{ip}:5000                  ║
+  ║  PC:      http://localhost:5000             ║
+  ║  Telefono: http://{ip}:5000          ║
   ╠══════════════════════════════════════════════╣
-  ║  Test:  http://localhost:5000/ping           ║
-  ║  Stats: http://localhost:5000/db_stats       ║
+  ║  Test:  http://localhost:5000/ping          ║
+  ║  Stats: http://localhost:5000/db_stats      ║
   ╚══════════════════════════════════════════════╝
     """)
 

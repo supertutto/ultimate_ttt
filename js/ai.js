@@ -1,24 +1,20 @@
-// ai.js — Web Worker autocontenuto
+// js/ai.js — Web Worker autocontenuto
 
-const WIN_LINES = [
-  [0,1,2],[3,4,5],[6,7,8],
-  [0,3,6],[1,4,7],[2,5,8],
-  [0,4,8],[2,4,6]
-];
-const CELL_LINES = [3,2,3, 2,4,2, 3,2,3]; // linee WIN per cella
-const PV_TABLE   = [3,2,3, 2,5,2, 3,2,3]; // valore posizionale
+// ── Costanti ──────────────────────────────────────────────────────────────────
+const WIN_LINES   = [[0,1,2],[3,4,5],[6,7,8],[0,3,6],[1,4,7],[2,5,8],[0,4,8],[2,4,6]];
+const CELL_LINES  = [3,2,3,2,4,2,3,2,3];
+const PV_TABLE    = [3,2,3,2,5,2,3,2,3];
 
 const W = {
-  WIN:        100000,
-  META_WIN:     2000,
-  META_FORK:    1000,
-  META_2:        280,
-  META_1:         45,
-  LOC_FORK:      160,
-  LOC_2:          30,
-  LOC_1:           7,
-  ACTIVITY:        5,
-  CENTER_SEND:    35,  // penalità per mandare avversario al centro
+  WIN:       100000,
+  META_WIN:    2000,
+  META_FORK:   1000,
+  META_2:       280,
+  META_1:        45,
+  LOC_FORK:     160,
+  LOC_2:         30,
+  LOC_1:          7,
+  ACTIVITY:       5,
 };
 
 const AI_MAX_DEPTH = 30;
@@ -26,12 +22,12 @@ const AI_MAX_DEPTH = 30;
 // ── Gioco ─────────────────────────────────────────────────────────────────────
 function opp(p){ return p==='X'?'O':'X'; }
 
-function checkGrid(grid){
+function checkGrid(g){
   for(const [a,b,c] of WIN_LINES){
-    const v=grid[a];
-    if((v==='X'||v==='O')&&v===grid[b]&&v===grid[c]) return v;
+    const v=g[a];
+    if((v==='X'||v==='O')&&v===g[b]&&v===g[c]) return v;
   }
-  return grid.includes(' ')?null:'D';
+  return g.includes(' ')?null:'D';
 }
 
 class Game {
@@ -47,9 +43,10 @@ class Game {
   copy(){
     const g=new Game();
     g.board=[...this.board.map(r=>[...r])];
-    g.big=[...this.big]; g.player=this.player;
-    g.active=this.active; g.over=this.over;
-    g.winner=this.winner; g.hist=[...this.hist.map(m=>({...m}))];
+    g.big=[...this.big];
+    g.player=this.player; g.active=this.active;
+    g.over=this.over; g.winner=this.winner;
+    g.hist=[...this.hist.map(m=>({...m}))];
     return g;
   }
   moves(){
@@ -62,8 +59,10 @@ class Game {
     );
   }
   push(b,c){
-    this.board[b][c]=this.player;
-    this.hist.push({b,c});
+    // Salviamo il player PRIMA del push (serve per CENTER_SEND)
+    const mover=this.player;
+    this.board[b][c]=mover;
+    this.hist.push({b,c,mover});          // <-- include chi ha mosso
     const res=checkGrid(this.board[b]);
     if(res&&this.big[b]===' ') this.big[b]=res;
     const gr=checkGrid(this.big);
@@ -71,13 +70,14 @@ class Game {
     const nb=this.big[c]===' '?[c]:[...Array(9).keys()].filter(i=>this.big[i]===' ');
     if(!nb.some(b2=>this.board[b2].includes(' '))){this.over=true;this.winner='D';return;}
     this.active=(this.big[c]===' ')?c:null;
-    this.player=opp(this.player);
+    this.player=opp(mover);
   }
 }
 
-// ── Euristica (senza bias di turno) ──────────────────────────────────────────
-// REGOLA FONDAMENTALE: evaluate() ritorna SEMPRE positivo=X vince, negativo=O vince
-// NON dipende da chi deve muovere — elimina l'oscillazione
+// ── Euristica ─────────────────────────────────────────────────────────────────
+// INVARIANTE: evaluate() è SEMPRE dal punto di vista assoluto
+// positivo = X avanti, negativo = O avanti
+// NON dipende da chi deve muovere → nessun bias di turno
 
 function openLinesMeta(big,idx){
   return WIN_LINES.filter(line=>{
@@ -102,8 +102,8 @@ function countThreats(grid,p){
   }).length;
 }
 
-function boardValueFor(g, boardIdx, p){
-  // Quanto vale la board per il giocatore p (chi ci dovrà giocare)
+// Quanto è vantaggiosa la board boardIdx per il giocatore p
+function boardValueFor(g,boardIdx,p){
   if(g.big[boardIdx]!==' ') return 0;
   const grid=g.board[boardIdx], e=opp(p);
   let v=0;
@@ -113,6 +113,17 @@ function boardValueFor(g, boardIdx, p){
     v+=vs.filter(x=>x===p).length*3+vs.filter(x=>x===' ').length;
   }
   return v;
+}
+
+// Conta quante mosse in questa board porterebbero p a vincere il quadrante
+function immediateBoardWin(grid, p){
+  let n=0;
+  for(const [a,b,c] of WIN_LINES){
+    const vs=[grid[a],grid[b],grid[c]];
+    if(vs.filter(v=>v===p).length===2 && vs.includes(' ') &&
+       !vs.includes(opp(p))) n++;
+  }
+  return n;
 }
 
 function evaluate(g){
@@ -126,12 +137,15 @@ function evaluate(g){
   let s=0;
   const big=g.big;
 
-  // 1. Quadranti vinti — valore = WIN * (posizione + linee meta aperte)
+  // 1. Quadranti vinti
+  // Peso alto e asimmetrico: vincere un quadrante vale MOLTO di più
+  // che qualsiasi vantaggio locale accumulato
   for(let i=0;i<9;i++){
     const cell=big[i];
     if(cell!=='X'&&cell!=='O') continue;
     const om=openLinesMeta(big,i);
-    const v=Math.floor(W.META_WIN*(PV_TABLE[i]+om)/6);
+    // Base alta: un quadrante vinto non può mai essere compensato da struttura locale
+    const v=W.META_WIN + PV_TABLE[i]*120 + om*200;
     s+=cell==='X'?v:-v;
   }
 
@@ -144,7 +158,7 @@ function evaluate(g){
     }
   }
 
-  // 3. Fork meta: 2+ minacce di vittoria meta simultanee
+  // 3. Fork meta (2+ minacce meta simultanee)
   for(const [p,sign] of [['X',1],['O',-1]]){
     const n=WIN_LINES.filter(([a,b,c])=>{
       const vs=[big[a],big[b],big[c]];
@@ -153,71 +167,93 @@ function evaluate(g){
     if(n>=2) s+=sign*W.META_FORK;
   }
 
-  // 4. Analisi locale quadranti aperti
+  // 4. Analisi locale — scalata in modo che NON superi mai il valore
+  //    di un singolo quadrante vinto
   for(let gi=0;gi<9;gi++){
     if(big[gi]!==' ') continue;
     const grid=g.board[gi];
     const ml=Math.max(1,openLinesMeta(big,gi));
     const pg=PV_TABLE[gi];
-    const scale=ml*pg;
 
-    // Fork locale
-    const tx=countThreats(grid,'X'), to=countThreats(grid,'O');
-    if(tx>=2) s+=W.LOC_FORK*scale/5;
-    if(to>=2) s-=W.LOC_FORK*scale/5;
+    // 4a. Minacce immediate di vincere il quadrante (peso alto ma < META_WIN)
+    const tx=immediateBoardWin(grid,'X');
+    const to=immediateBoardWin(grid,'O');
+    // Ogni minaccia di vincita quadrante vale ~15% di META_WIN
+    s += tx * W.META_WIN * 0.15 * ml * pg / 5;
+    s -= to * W.META_WIN * 0.15 * ml * pg / 5;
 
-    // 2-in-fila e 1-in-fila
+    // 4b. Fork locale (due minacce contemporanee)
+    if(tx>=2) s+=W.LOC_FORK*ml*pg/5;
+    if(to>=2) s-=W.LOC_FORK*ml*pg/5;
+
+    // 4c. 2-in-fila e 1-in-fila — peso basso
     for(const [a,b,c] of WIN_LINES){
       const vs=[grid[a],grid[b],grid[c]];
-      s+=lineVal(vs,'X',W.LOC_2*scale/5,W.LOC_1*scale/5);
-      s-=lineVal(vs,'O',W.LOC_2*scale/5,W.LOC_1*scale/5);
+      s+=lineVal(vs,'X',W.LOC_2*ml*pg/5,W.LOC_1*ml*pg/5);
+      s-=lineVal(vs,'O',W.LOC_2*ml*pg/5,W.LOC_1*ml*pg/5);
     }
 
-    // Attività pezzi: linee aperte × numero linee che passano per la cella
+    // 4d. Attività pezzi
     for(let ci=0;ci<9;ci++){
       const cell=grid[ci];
       if(cell!=='X'&&cell!=='O') continue;
       const e=opp(cell);
       const openL=WIN_LINES.filter(ln=>ln.includes(ci)&&!ln.some(i=>grid[i]===e)).length;
-      const v=W.ACTIVITY*openL*CELL_LINES[ci]*scale/20;
+      const v=W.ACTIVITY*openL*CELL_LINES[ci]*ml*pg/20;
       s+=cell==='X'?v:-v;
     }
   }
 
-  // 5. Penalità invio avversario in board strategicamente buona
-  // (si calcola SIMMETRICAMENTE per entrambi — nessun bias di turno)
+  // 5. Penalità per mandare l'avversario in board pericolosa
   if(g.hist.length>0){
     const last=g.hist[g.hist.length-1];
-    const tgt=last.c;
-    const mover=opp(g.player);          // chi ha appena mosso
-    const receiver=g.player;            // chi giocherà nella board tgt
-    const quality=boardValueFor(g,tgt,receiver);
-    // Il mover ha mandato il receiver in una board buona → svantaggio per mover
-    s+=(mover==='X'?-1:+1)*quality*W.CENTER_SEND/20;
+    const mover   = last.mover||(g.hist.length%2===1?'X':'O');
+    const receiver= opp(mover);
+    const tgt     = last.c;
+    if(g.big[tgt]===' '){
+      // Penalità proporzionale alle minacce immediate dell'avversario in quella board
+      const danger=immediateBoardWin(g.board[tgt], receiver);
+      const quality=boardValueFor(g,tgt,receiver);
+      const penalty=(danger*W.META_WIN*0.12 + quality*6);
+      s+=mover==='X'?-penalty:penalty;
+    }
   }
-
-  // !! NESSUN TERMINE DI MOBILITÀ ASSOLUTA !!
-  // La mobilità assoluta crea il bias di turno che fa oscillare l'eval.
-  // Viene considerata implicitamente nel termine di fork e nelle minacce.
 
   return Math.round(s);
 }
 
-// ── Ordinamento mosse ─────────────────────────────────────────────────────────
+// ── Ordinamento ───────────────────────────────────────────────────────────────
 function orderMoves(g,mvs){
   const p=g.player, e=opp(p);
   return [...mvs].sort((ma,mb)=>{
     function sc({b,c}){
       let n=0;
-      // Vince quadrante?
+
+      // ── Priorità 1: vince quadrante subito (+3000)
       const gr=[...g.board[b]]; gr[c]=p;
       if(WIN_LINES.some(([a,bb,cc])=>gr[a]===p&&gr[bb]===p&&gr[cc]===p)) n+=3000;
-      // Blocca vittoria avversario?
+
+      // ── Priorità 2: blocca vittoria immediata avversario (+1500)
       const gr2=[...g.board[b]]; gr2[c]=e;
       if(WIN_LINES.some(([a,bb,cc])=>gr2[a]===e&&gr2[bb]===e&&gr2[cc]===e)) n+=1500;
-      // Penalizza invio avversario in board buona
-      n-=boardValueFor(g,c,e)*2;
-      // Valore posizionale
+
+      // ── Priorità 3: penalità FORTE se mandi avversario in board
+      //    dove ha già minacce di vincita quadrante (-2000 per minaccia)
+      if(g.big[c]===' '){
+        const danger=immediateBoardWin(g.board[c], e);
+        n -= danger * 2000;
+        // Penalità aggiuntiva se mandi al centro (board 4)
+        if(c===4) n -= boardValueFor(g,4,e)*10;
+      }
+
+      // ── Priorità 4: bonus per mandare avversario in board difficile per lui
+      if(g.big[c]===' '){
+        const myFriendly=boardValueFor(g,c,p);
+        const hisDifficult=10-boardValueFor(g,c,e);
+        n+=hisDifficult*4+myFriendly*2;
+      }
+
+      // ── Priorità 5: valore posizionale
       n+=PV_TABLE[c]*8+PV_TABLE[b]*6;
       return -n;
     }
@@ -225,14 +261,30 @@ function orderMoves(g,mvs){
   });
 }
 
-// ── Minimax + TT ──────────────────────────────────────────────────────────────
+// ── Transposition Table ───────────────────────────────────────────────────────
 let tt=new Map();
 
 function ttKey(g){
   return g.board.map(r=>r.join('')).join('|')+'|'+
-         g.big.join('')+'|'+g.active+'|'+g.player;
+         g.big.join('')+'|'+(g.active??'N')+'|'+g.player;
 }
 
+// Carica nel TT le posizioni del DB server rilevanti per la posizione g
+function loadDBIntoTT(dbEntries){
+  let loaded=0;
+  for(const entry of dbEntries){
+    if(!entry.move||!entry.score||entry.depth<3) continue;
+    // Ricostruisce la chiave dalla posizione
+    if(!entry._key) continue;
+    const m=Array.isArray(entry.move)
+      ?{b:entry.move[0],c:entry.move[1]}:entry.move;
+    tt.set(entry._key,{d:entry.depth,f:'exact',v:entry.score,m});
+    loaded++;
+  }
+  return loaded;
+}
+
+// ── Minimax ───────────────────────────────────────────────────────────────────
 function minimax(g,depth,alpha,beta,isMax,deadline){
   if(Date.now()>=deadline) return {v:evaluate(g),m:null,timeout:true};
 
@@ -284,8 +336,9 @@ function minimax(g,depth,alpha,beta,isMax,deadline){
   }
 }
 
-// ── Principal Variation ───────────────────────────────────────────────────────
-function extractPV(g,maxLen=8){
+// ── PV extraction ─────────────────────────────────────────────────────────────
+function extractPV(g,maxLen){
+  maxLen=maxLen||8;
   const pv=[]; let cur=g.copy(); const seen=new Set();
   while(pv.length<maxLen&&!cur.over){
     const key=ttKey(cur);
@@ -293,7 +346,6 @@ function extractPV(g,maxLen=8){
     seen.add(key);
     const {m}=tt.get(key);
     if(!m) break;
-    // Verifica che la mossa sia legale
     const legal=cur.moves().find(mv=>mv.b===m.b&&mv.c===m.c);
     if(!legal) break;
     pv.push({b:m.b,c:m.c,player:cur.player});
@@ -302,28 +354,49 @@ function extractPV(g,maxLen=8){
   return pv;
 }
 
-// ── DB cache dal server (se disponibile) ─────────────────────────────────────
+// ── Server DB lookup ──────────────────────────────────────────────────────────
 let serverUrl='';
 
-async function lookupDB(g){
+async function fetchDBEntry(g){
   if(!serverUrl) return null;
   try{
-    const key=g.board.map(r=>r.join('')).join('')+g.big.join('')+(g.active??'N')+g.player;
     const r=await fetch(serverUrl+'/analyze',{
       method:'POST',
       headers:{'Content-Type':'application/json'},
       body:JSON.stringify({
-        board:g.board,big:g.big,player:g.player,
-        active:g.active,over:g.over,winner:g.winner,
+        board:g.board, big:g.big, player:g.player,
+        active:g.active, over:g.over, winner:g.winner,
         hist:g.hist.map(({b,c})=>[b,c])
       }),
-      signal:AbortSignal.timeout(3000)
+      signal:AbortSignal.timeout(4000)
     });
     if(!r.ok) return null;
-    const d=await r.json();
-    if(d.move&&d.depth>=4) return d;
-  }catch(e){}
-  return null;
+    return await r.json();
+  }catch(e){ return null; }
+}
+
+// Integra la risposta del server nella TT locale
+function injectServerEntry(g, entry){
+  if(!entry||!entry.move||entry.depth<3) return;
+  const key=ttKey(g);
+  const existing=tt.get(key);
+  if(existing&&existing.d>=entry.depth) return; // già abbiamo meglio
+  const m=Array.isArray(entry.move)
+    ?{b:entry.move[0],c:entry.move[1]}:{b:entry.move.b,c:entry.move.c};
+  tt.set(key,{d:entry.depth,f:'exact',v:entry.score,m});
+  // Inietta anche le posizioni della PV
+  if(entry.pv&&entry.pv.length){
+    let cur=g.copy();
+    for(const mv of entry.pv){
+      cur.push(mv[0]??mv.b, mv[1]??mv.c);
+      // Non abbiamo il valore esatto per gli step intermedi,
+      // ma possiamo stimarlo con evaluate
+      const k=ttKey(cur);
+      if(!tt.has(k)){
+        tt.set(k,{d:Math.max(1,entry.depth-1),f:'exact',v:evaluate(cur),m:null});
+      }
+    }
+  }
 }
 
 // ── Message handler ───────────────────────────────────────────────────────────
@@ -333,6 +406,7 @@ self.onmessage=async function(e){
   if(msg.type!=='start') return;
 
   tt.clear();
+
   const g=new Game();
   g.board  = msg.state.board.map(r=>[...r]);
   g.big    = [...msg.state.big];
@@ -342,29 +416,32 @@ self.onmessage=async function(e){
   g.winner = msg.state.winner;
   g.hist   = msg.state.hist.map(m=>({...m}));
 
-  const isMax=g.player==='X';
+  const isMax   =g.player==='X';
   const deadline=Date.now()+msg.timeMs;
 
-  // Fallback immediato con mossa euristica
+  // Mossa di fallback euristica immediata
   const fallback=orderMoves(g,g.moves());
   let bestM=fallback[0]||null;
   let bestV=evaluate(g);
 
-  // Controlla DB server prima di calcolare
-  const cached=await lookupDB(g);
-  if(cached&&cached.move){
-    const cm=Array.isArray(cached.move)
-      ?{b:cached.move[0],c:cached.move[1]}
-      :cached.move;
-    const legal=g.moves().find(mv=>mv.b===cm.b&&mv.c===cm.c);
-    if(legal){
-      bestM=cm; bestV=cached.score||bestV;
-      const pv=extractPV(g,8);
-      self.postMessage({type:'result',score:bestV,move:bestM,depth:cached.depth||0,pv,fromDB:true});
+  // 1. Consulta il DB del server PRIMA di iniziare minimax
+  //    Questo pre-carica la TT con la conoscenza accumulata
+  const dbEntry=await fetchDBEntry(g);
+  if(dbEntry){
+    injectServerEntry(g,dbEntry);
+    if(dbEntry.move){
+      const dm=Array.isArray(dbEntry.move)
+        ?{b:dbEntry.move[0],c:dbEntry.move[1]}:dbEntry.move;
+      const legal=g.moves().find(mv=>mv.b===dm.b&&mv.c===dm.c);
+      if(legal){
+        bestM=dm; bestV=dbEntry.score||bestV;
+        const pv=extractPV(g,8);
+        self.postMessage({type:'result',score:bestV,move:bestM,depth:dbEntry.depth||0,pv,fromDB:true});
+      }
     }
   }
 
-  // Iterative deepening entro la deadline
+  // 2. Iterative deepening con TT pre-caricata dal DB
   for(let depth=1;depth<=AI_MAX_DEPTH;depth++){
     if(Date.now()>=deadline) break;
     const res=minimax(g,depth,-Infinity,Infinity,isMax,deadline);
